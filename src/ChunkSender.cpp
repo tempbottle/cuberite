@@ -34,7 +34,7 @@ class cNotifyChunkSender :
 			a_ChunkX, a_ChunkZ,
 			[&ChunkSender] (cChunk & a_Chunk) -> bool
 			{
-				ChunkSender.QueueSendChunkTo(a_Chunk.GetPosX(), a_Chunk.GetPosZ(), cChunkSender::PRIORITY_BROADCAST, a_Chunk.GetAllClients());
+				ChunkSender.QueueSendChunkTo(a_Chunk.GetPosX(), a_Chunk.GetPosZ(), cChunkSender::E_CHUNK_PRIORITY_HIGH, a_Chunk.GetAllClients());
 				return true;
 			}
 		);
@@ -51,8 +51,7 @@ public:
 
 cChunkSender::cChunkSender(cWorld & a_World) :
 	super("ChunkSender"),
-	m_World(a_World),
-	m_RemoveCount(0)
+	m_World(a_World)
 {
 }
 
@@ -156,18 +155,12 @@ void cChunkSender::QueueSendChunkTo(int a_ChunkX, int a_ChunkZ, eChunkPriority a
 
 void cChunkSender::RemoveClient(cClientHandle * a_Client)
 {
+	cCSLock Lock(m_CS);
+	for (auto && pair : m_ChunkInfo)
 	{
-		cCSLock Lock(m_CS);
-		for (auto && pair : m_ChunkInfo)
-		{
-			auto && clients = pair.second.m_Clients;
-			clients.erase(a_Client);  // nop for sets that do not contain a_Client
-		}
-
-		m_RemoveCount++;
+		auto && clients = pair.second.m_Clients;
+		clients.erase(a_Client);  // nop for sets that do not contain a_Client
 	}
-	m_evtQueue.Set();
-	m_evtRemoved.Wait();  // Wait for removal confirmation
 }
 
 
@@ -178,40 +171,28 @@ void cChunkSender::Execute(void)
 {
 	while (!m_ShouldTerminate)
 	{
+		m_evtQueue.Wait();
+
 		cCSLock Lock(m_CS);
-		do
+		while (!m_SendChunks.empty())
 		{
-			int RemoveCount = m_RemoveCount;
-			m_RemoveCount = 0;
+			// Take one from the queue:
+			auto Chunk = m_SendChunks.top().m_Chunk;
+			m_SendChunks.pop();
+			auto itr = m_ChunkInfo.find(Chunk);
+			if (itr == m_ChunkInfo.end())
+			{
+				continue;
+			}
+
+			std::unordered_set<cClientHandle *> clients;
+			std::swap(itr->second.m_Clients, clients);
+			m_ChunkInfo.erase(itr);
+
 			cCSUnlock Unlock(Lock);
-			for (int i = 0; i < RemoveCount; i++)
-			{
-				m_evtRemoved.Set();  // Notify that the removed clients are safe to be deleted
-			}
-			m_evtQueue.Wait();
-			if (m_ShouldTerminate)
-			{
-				return;
-			}
-		} while (m_SendChunks.empty());
-
-		// Take one from the queue:
-		auto Chunk = m_SendChunks.top().m_Chunk;
-		m_SendChunks.pop();
-		auto itr = m_ChunkInfo.find(Chunk);
-		if (itr == m_ChunkInfo.end())
-		{
-			continue;
+			SendChunk(Chunk.m_ChunkX, Chunk.m_ChunkZ, clients);
 		}
-		
-		std::unordered_set<cClientHandle *> clients;
-		std::swap(itr->second.m_Clients, clients);
-		m_ChunkInfo.erase(itr);
-
-		Lock.Unlock();
-
-		SendChunk(Chunk.m_ChunkX, Chunk.m_ChunkZ, clients);
-	}  // while (!mShouldTerminate)
+	}  // while (!m_ShouldTerminate)
 }
 
 
@@ -260,13 +241,13 @@ void cChunkSender::SendChunk(int a_ChunkX, int a_ChunkZ, std::unordered_set<cCli
 	}
 	cChunkDataSerializer Data(m_BlockTypes, m_BlockMetas, m_BlockLight, m_BlockSkyLight, m_BiomeMap);
 
-	for (auto client : a_Clients)
+	for (const auto client : a_Clients)
 	{
 		// Send:
 		client->SendChunkData(a_ChunkX, a_ChunkZ, Data);
 
 		// Send block-entity packets:
-		for (auto Pos : m_BlockEntities)
+		for (const auto & Pos : m_BlockEntities)
 		{
 			m_World.SendBlockEntity(Pos.x, Pos.y, Pos.z, *client);
 		}  // for itr - m_Packets[]
