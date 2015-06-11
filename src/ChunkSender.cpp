@@ -171,11 +171,25 @@ void cChunkSender::Execute(void)
 {
 	while (!m_ShouldTerminate)
 	{
-		m_evtQueue.Wait();
-
-		cCSLock Lock(m_CS);
-		while (!m_SendChunks.empty())
+		while (m_SendChunks.empty());
 		{
+			int RemoveCount = m_RemoveCount;
+			m_RemoveCount = 0;
+			cCSUnlock Unlock(Lock);
+			for (int i = 0; i < RemoveCount; i++)
+			{
+				m_evtRemoved.Set();  // Notify that the removed clients are safe to be deleted
+			}
+			m_evtQueue.Wait();
+			if (m_ShouldTerminate)
+			{
+				return;
+			}
+		}
+
+		int RemoveCount;
+		{
+			cCSLock Lock(m_CS);
 			// Take one from the queue:
 			auto Chunk = m_SendChunks.top().m_Chunk;
 			m_SendChunks.pop();
@@ -184,13 +198,21 @@ void cChunkSender::Execute(void)
 			{
 				continue;
 			}
-
+	
 			std::unordered_set<cClientHandle *> clients;
 			std::swap(itr->second.m_Clients, clients);
 			m_ChunkInfo.erase(itr);
-
-			cCSUnlock Unlock(Lock);
-			SendChunk(Chunk.m_ChunkX, Chunk.m_ChunkZ, clients);
+			
+			{
+				cCSUnlock Unlock(Lock);
+				SendChunk(Chunk.m_ChunkX, Chunk.m_ChunkZ, clients);
+			}
+			RemoveCount = m_RemoveCount;
+			m_RemoveCount = 0;
+		}
+		for (int i = 0; i < RemoveCount; i++)
+		{
+			m_evtRemoved.Set();  // Notify that the removed clients are safe to be deleted
 		}
 	}  // while (!m_ShouldTerminate)
 }
